@@ -217,9 +217,50 @@ def extract_kaltura(video):
     return eid, p, sp
 
 
-def hls_url(eid, p, sp):
-    return (f"https://cfvod.kaltura.com/p/{p}/sp/{sp}/playManifest/"
-            f"entryId/{eid}/format/applehttp/protocol/https/a.m3u8")
+FLAVOR_IN_URL = re.compile(r'flavorId/(\d+_[a-zA-Z0-9]+)')
+
+
+def hls_url(eid, p, sp, flavor_ids=None):
+    base = f"https://cfvod.kaltura.com/p/{p}/sp/{sp}/playManifest/entryId/{eid}"
+    if flavor_ids:
+        return (base + f"/flavorIds/{','.join(flavor_ids)}"
+                       "/format/applehttp/protocol/https/a.m3u8")
+    return base + "/format/applehttp/protocol/https/a.m3u8"
+
+
+_flavor_cache = {}
+
+
+def video_flavor_ids(eid, p, sp):
+    """Busca o master HLS e devolve SOMENTE os flavorIds de VIDEO (variantes
+    com RESOLUTION). Exclui a variante somente-audio (BANDWIDTH baixo, sem
+    RESOLUTION) que faz players simples (SS IPTV) tocarem 'so audio, sem
+    imagem'. As variantes de video do Runtime/Kaltura ja sao muxadas
+    (video H264 + audio AAC no mesmo segmento)."""
+    if eid in _flavor_cache:
+        return _flavor_cache[eid]
+    ids = []
+    try:
+        master = http_get(hls_url(eid, p, sp),
+                          {"User-Agent": UA}).decode("utf-8", "ignore")
+        lines = master.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("#EXT-X-STREAM-INF") and "RESOLUTION=" in ln:
+                for nxt in lines[i + 1:]:
+                    if nxt and not nxt.startswith("#"):
+                        m = FLAVOR_IN_URL.search(nxt)
+                        if m and m.group(1) not in ids:
+                            ids.append(m.group(1))
+                        break
+    except Exception:
+        ids = []
+    _flavor_cache[eid] = ids
+    return ids
+
+
+def stream_url(eid, p, sp):
+    """URL HLS final, com a correcao de so-audio aplicada quando possivel."""
+    return hls_url(eid, p, sp, video_flavor_ids(eid, p, sp) or None)
 
 
 def clean(s):
@@ -270,48 +311,56 @@ def main():
     entries = []  # (grupo, chave_ordenacao, titulo, url, logo)
 
     def work(item):
+        """Processa um show: baixa episodios e ja resolve a URL de video
+        muxada (correcao so-audio) de cada um, em paralelo."""
         show, genero = item
         vids = fetch_show_videos(show["id"], headers)
-        return show, genero, vids
+        sname = clean(show.get("name"))
+        single = len(vids) == 1
+        tipo = "Filmes" if single else "Series"   # 1 ep -> Filme ; varios -> Serie
+        out = []
+        for v in vids:
+            eid, p, sp = extract_kaltura(v)
+            if not (eid and p and sp):
+                continue
+            vname = clean(v.get("name"))
+            if single or not vname or vname.lower() == sname.lower():
+                title = sname
+            else:
+                title = f"{sname} - {vname}"
+            logo = v.get("widescreen_thumbnail_url") or v.get("thumbnail_url") or ""
+            if tipo == "Series":
+                grupo = f"Series \u2022 {genero} \u2022 {sname}"
+            else:
+                grupo = f"Filmes \u2022 {genero}"
+            sortkey = (tipo, genero.lower(), sname.lower(), title.lower())
+            out.append((grupo, sortkey, title, stream_url(eid, p, sp), logo))
+        return out
 
     done = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futs = [ex.submit(work, it) for it in shows]
         for fut in as_completed(futs):
-            show, genero, vids = fut.result()
-            sname = clean(show.get("name"))
-            single = len(vids) == 1
-            # 1 episodio -> Filme ; varios episodios -> Serie/Novela
-            tipo = "Filmes" if single else "Series"
-            for v in vids:
-                eid, p, sp = extract_kaltura(v)
-                if not (eid and p and sp):
-                    continue
-                vname = clean(v.get("name"))
-                if single or not vname or vname.lower() == sname.lower():
-                    title = sname
-                else:
-                    title = f"{sname} - {vname}"
-                logo = v.get("widescreen_thumbnail_url") or v.get("thumbnail_url") or ""
-                if tipo == "Series":
-                    grupo = f"Series \u2022 {genero} \u2022 {sname}"
-                else:
-                    grupo = f"Filmes \u2022 {genero}"
-                sortkey = (tipo, genero.lower(), sname.lower(), title.lower())
-                entries.append((grupo, sortkey, title, hls_url(eid, p, sp), logo))
+            entries.extend(fut.result())
             done += 1
             if done % 50 == 0:
                 print(f"  {done}/{len(shows)} shows processados...")
 
-    for v, name, genero in direct_videos:
+    def work_direct(triple):
+        v, name, genero = triple
         eid, p, sp = extract_kaltura(v)
         if not (eid and p and sp):
-            continue
+            return None
         logo = v.get("widescreen_thumbnail_url") or v.get("thumbnail_url") or ""
         grupo = f"Filmes \u2022 {genero}"
         title = name or "Sem titulo"
         sortkey = ("Filmes", genero.lower(), title.lower(), "")
-        entries.append((grupo, sortkey, title, hls_url(eid, p, sp), logo))
+        return (grupo, sortkey, title, stream_url(eid, p, sp), logo)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        for r in ex.map(work_direct, direct_videos):
+            if r:
+                entries.append(r)
 
     # dedupe por URL
     seen, uniq = set(), []

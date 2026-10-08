@@ -34,6 +34,18 @@ inicio do arquivo `gerar_runtime_vod.py`. Para voltar a incluir todo o catalogo
     Crime, Aventura, Animacao, Reality, Historia, etc.).
 - Os links de video sao HLS diretos (Kaltura), que o proprio player abre.
 
+## Correcao: "so audio, sem imagem"
+
+O master HLS original do Runtime.tv (Kaltura) incluia uma variante **somente de
+audio** (sem resolucao, menor bitrate) junto das variantes de video. Players
+simples como o **SS IPTV** acabavam escolhendo essa variante e reproduziam
+**so o audio, sem imagem**. A lista agora monta a URL apontando **apenas para
+as variantes de video** (que ja vem muxadas: video H.264 + audio AAC no mesmo
+fluxo), eliminando a trilha so-audio. Resultado: imagem + som normais no VLC e
+no SS IPTV. Como a URL continua sendo um `playManifest` do Kaltura (sem
+assinatura embutida), ela permanece valida e os segmentos sao renovados a cada
+reproducao.
+
 ## Como publicar no GitHub
 
 1. Crie um repositorio novo (pode ser publico) no GitHub.
