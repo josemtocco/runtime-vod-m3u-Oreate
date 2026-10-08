@@ -38,7 +38,7 @@ TIMEOUT = 40
 # Observacao: o catalogo depende da regiao do IP que coleta. Rodando fora do
 # Brasil (ex.: GitHub Actions nos EUA) aparecem poucos titulos em portugues;
 # rodando de um IP brasileiro o catalogo em portugues fica completo.
-ONLY_PORTUGUESE = False
+ONLY_PORTUGUESE = True
 
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
